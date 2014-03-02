@@ -25,12 +25,12 @@
 #	
 #
 
-
+use lib "/usr/lib/perl5/site_perl/5.10.0/";
 use strict;
 use warnings;
 use Term::ReadKey;
-#use autodie;
-use Path::Class;
+use autodie;
+#use Path::Class;
 
 while(1)
 {
@@ -44,10 +44,9 @@ sub displayMenu
 	print "\n\nVCAP-Labs\n";
 	print "Enviroment level 510\n";
 	print "\n(C) Hannu Balk 2014\n";
-	my $dir = dir("./");
-	my $file = $dir->file("LICENSE");
-	my $license = $file->slurp();
-	print "Please make a selection:\n";
+	open FILE, "LICENSE" or die $!;
+	while(<FILE>){print $_;}
+	print "\n\nPlease make a selection:\n";
 	print "\t(1) Lab 1\n";
 	print "\t(2) Lab 2\n";
 	print "\t(H) Help\n";
