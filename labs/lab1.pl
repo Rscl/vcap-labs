@@ -2,6 +2,7 @@
 use strict;
 use warnings;
 use VMware::VIRuntime;
+use Data::Dumper;
 use Term::ReadKey;
 
 my $vm_name = "VCAP Labs L1VM1";
@@ -29,11 +30,15 @@ ReadMode 1;
 print "\n";
 my $url = "https://$server/sdk/vimService";
 
-printf "Using following settings:\nServer url: $url\nUsername: $username\nPassword: <masked>\n";
+printf "\nUsing following settings:\nServer url: $url\n";
 
 my $vim = Vim->new(service_url => $url);
 $vim->login(user_name => $username, password => $password);
 #$vim->save_session(".lab1.session");
+
+my $datacenter_views =$vim->find_entity_views (view_type => 'Datacenter');
+my $datacenter = @$datacenter_views[0];
+print "Using datacenter: " . $datacenter->name  ."\n";
 
 my $host_views = $vim->find_entity_views(view_type => 'HostSystem');
 my $host_index = 0;
@@ -56,8 +61,7 @@ if($host_index eq 1)
 if($host_index gt 1)
 {
 	# Ask user which host to use in lab
-	print "Please select host: ";
-	$host = @$host_views[getNumeric()];
+	$host = @$host_views[getNumeric(text=>"Please select host: ")];
 }
 
 # Select Datastore
@@ -108,8 +112,8 @@ printf "Creating VM...";
 my @vm_devices;
 my $vm_path = "[".$ds->summary->name."]";
 my $controller_vm_dev_conf_spec = create_conf_spec(); print "*";
-my $disk_vm_dev_conf_spec = create_virtual_disk(name=>$vm_path, size=>$vm_disk_size); print "*";
-my %net_settings = get_network(network_name => "VM Network", poweron => 0, host_view=>$host); print "*";
+my $disk_vm_dev_conf_spec = create_virtual_disk(fileName=>$vm_path, size=>100000); print "*";
+my %net_settings = get_network(network_name => "VM Network", poweron => 0, host_view=>$host, vim=>$vim); print "*";
 if($net_settings{'error'} eq 0) {
       push(@vm_devices, $net_settings{'network_conf'}); print "*";
    } elsif ($net_settings{'error'} eq 1) {
@@ -129,22 +133,55 @@ my $files = VirtualMachineFileInfo->new(logDirectory => undef,
                                              memoryMB => $vm_mem_size,
                                              files => $files,
                                              numCPUs => $vm_cpu_count,
-                                             guestId => 1,
+                                             guestId => "rhel6_64Guest",
                                              deviceChange => \@vm_devices); print "*";
-my $datacenter_views =$vim->find_entity_views (view_type => 'Datacenter'); print "*";
-my $datacenter = @$datacenter_views[0]; print "*";
 my $vm_folder_view = $vim->get_view(mo_ref => $datacenter->vmFolder); print "*";
 my $comp_res_view = $vim->get_view(mo_ref => $host->parent); print "*";
 eval {
+		print "\nDebug: Creating VM....\n";
       $vm_folder_view->CreateVM(config => $vm_config_spec,
                              pool => $comp_res_view->resourcePool);
       Util::trace(0, "Done\nSuccessfully created virtual machine: "
                        ."'$vm_name' under host ". $host->name ."\n");
     };
     if ($@) {
-		die "Failed!\nError while creating VM. Your job is to fix it and I can not help you on this matter...\n\n";
-	}
+       Util::trace(0, "\nError creating VM '$vm_name': ");
+	   print Dumper($@);
+       if (ref($@) eq 'SoapFault') {
+          if (ref($@->detail) eq 'PlatformConfigFault') {
+             Util::trace(0, "Invalid VM configuration: "
+                            . ${$@->detail}{'text'} . "\n");
+          }
+          elsif (ref($@->detail) eq 'InvalidDeviceSpec') {
+             Util::trace(0, "Invalid Device configuration: "
+                            . ${$@->detail}{'property'} . "\n");
+          }
+           elsif (ref($@->detail) eq 'DatacenterMismatch') {
+             Util::trace(0, "DatacenterMismatch, the input arguments had entities "
+                          . "that did not belong to the same datacenter\n");
+          }
+           elsif (ref($@->detail) eq 'HostNotConnected') {
+             Util::trace(0, "Unable to communicate with the remote host,"
+                         . " since it is disconnected\n");
+          }
+          elsif (ref($@->detail) eq 'InvalidState') {
+             Util::trace(0, "The operation is not allowed in the current state\n");
+          }
+          elsif (ref($@->detail) eq 'DuplicateName') {
+             Util::trace(0, "Virtual machine already exists.\n");
+          }
+          else {
+             Util::trace(0, "\n" . $@ . "\n");
+          }
+       }
+       else {
+          Util::trace(0, "\n" . $@ . "\n");
+       }
+   }
+	
 $vim->logout();
+print "\nLogged out. Thank you.\n";
+
 
 sub create_conf_spec
 {
@@ -156,12 +193,12 @@ sub create_conf_spec
 sub create_virtual_disk
 {
 	my %args = @_;
-	my $path = $args{path};
+	my $path = $args{fileName};
 	my $size = $args{size};
-	
+	print "\nDebug: " . $path. "\n";
 	my $disk_backing_info = VirtualDiskFlatVer2BackingInfo->new(diskMode=>'persistent', fileName=>$path);
 	my $disk = VirtualDisk->new(backing=>$disk_backing_info, controllerKey => 0, key => 0, unitNumber => 0, capacityInKB=>$size*1024);
-	my $disk_vm_dev_conf_spec = VirtualDeviceConfigSpec->new(device->$disk, fileOperation=>VirtualDeviceConfigSpecFileOperation->new('create'), operation=>VirtualDeviceConfigSpecOperation->new('add'));
+	my $disk_vm_dev_conf_spec = VirtualDeviceConfigSpec->new(device=>$disk, fileOperation=>VirtualDeviceConfigSpecFileOperation->new('create'), operation=>VirtualDeviceConfigSpecOperation->new('add'));
 	return $disk_vm_dev_conf_spec;
 }
 
@@ -170,11 +207,12 @@ sub get_network {
    my $network_name = $args{network_name};
    my $poweron = $args{poweron};
    my $host_view = $args{host_view};
+   my $vim = $args{vim};
    my $network = undef;
    my $unit_num = 1;  # 1 since 0 is used by disk
 
    if($network_name) {
-      my $network_list = Vim::get_views(mo_ref_array => $host_view->network);
+      my $network_list = $vim->get_views(mo_ref_array => $host_view->network);
       foreach (@$network_list) {
          if($network_name eq $_->name) {
             $network = $_;
@@ -212,18 +250,12 @@ sub get_network {
 
 sub getNumeric
 {
+	my %args = @_;
+	my $text = $args{text};
+	ReadMode 1;
+	print $text;
 	my $val = <>;
 	chomp($val);
-	if(not length $val)
-	{
-		print "Invalid input.\n";
-		return getNumeric();
-	}
-	if($val =~ /[0-9]/)
-	{
-		print "Invalid input.\n";
-		return getNumeric();
-	}
 	return $val;
 }
 
